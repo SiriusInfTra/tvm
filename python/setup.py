@@ -199,13 +199,19 @@ if not CONDA_BUILD:
     with open("MANIFEST.in", "w") as fo:
         for path in LIB_LIST:
             if os.path.isfile(path):
-                shutil.copy(path, os.path.join(CURRENT_DIR, "tvm"))
+                try:
+                    shutil.copy(path, os.path.join(CURRENT_DIR, "tvm"))
+                except shutil.SameFileError:
+                    pass
                 _, libname = os.path.split(path)
                 fo.write(f"include tvm/{libname}\n")
 
             if os.path.isdir(path):
                 _, libname = os.path.split(path)
-                shutil.copytree(path, os.path.join(CURRENT_DIR, "tvm", libname))
+                try:
+                    shutil.copytree(path, os.path.join(CURRENT_DIR, "tvm", libname), dirs_exist_ok=True)
+                except shutil.SameFileError:
+                    pass
                 fo.write(f"recursive-include tvm/{libname} *\n")
 
     setup_kwargs = {"include_package_data": True}
