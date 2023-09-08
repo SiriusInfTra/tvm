@@ -194,6 +194,12 @@ class TVM_DLL GraphExecutor : public ModuleNode {
    */
   void LoadParams(const std::string& param_blob);
 
+  void ResetStorage();
+  void AllocStorage();
+  // pipeline load and run
+  void PipelineLoadParams();
+  void PipelineRun();
+
   /*!
    * \brief Share parameters from pre-existing GraphExecutor instance.
    * \param other A GraphExecutor instance, previously with |LoadParams| called with the
@@ -438,6 +444,8 @@ class TVM_DLL GraphExecutor : public ModuleNode {
    */
   std::pair<std::function<void()>, std::shared_ptr<OpArgs>> CreateTVMOp(
       const TVMOpParam& attrs, const std::vector<DLTensor>& args);
+  std::pair<std::function<void()>, std::shared_ptr<OpArgs>> CreateTVMOp(
+      const TVMOpParam& attrs, const std::vector<DLTensor*>& args);
   // Get node entry index.
   uint32_t entry_id(uint32_t nid, uint32_t index) const { return node_row_ptr_[nid] + index; }
   // Get node entry index.
@@ -487,6 +495,13 @@ class TVM_DLL GraphExecutor : public ModuleNode {
    * When the module does not include linked parmeters, module_lookup_linked_param_ will be nullptr.
    */
   bool module_lookup_linked_param_valid_;
+
+  std::vector<PoolEntry> pool_entry_;
+  std::vector<std::pair<size_t, NDArray>> host_param_pool_;
+  std::vector<bool> is_param_ready_;
+  std::vector<std::vector<size_t>> input_param_eid_;
+  TVMStreamHandle param_load_stream_{nullptr};
+  TVMStreamHandle pipeline_run_stream_{nullptr};
 };
 
 std::vector<Device> GetAllDevice(const TVMArgs& args, int dev_start_arg);

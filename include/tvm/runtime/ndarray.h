@@ -214,7 +214,9 @@ class NDArray : public ObjectRef {
    * \brief Get mutable internal container pointer.
    * \return a mutable container pointer.
    */
+ public:
   inline Container* get_mutable() const;
+ protected:
   // Helper functions for FFI handling.
   /*!
    * \brief Construct NDArray's Data field from array handle in FFI.

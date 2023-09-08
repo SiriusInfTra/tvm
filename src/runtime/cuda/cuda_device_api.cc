@@ -118,9 +118,33 @@ class CUDADeviceAPI final : public DeviceAPI {
       CUDA_CALL(cudaSetDevice(dev.device_id));
       size_t free_mem, total_mem;
       CUDA_CALL(cudaMemGetInfo(&free_mem, &total_mem));
+#if 0
       VLOG(1) << "allocating " << nbytes << " bytes on device, with " << free_mem
               << " bytes currently free out of " << total_mem << " bytes available";
       CUDA_CALL(cudaMalloc(&ret, nbytes));
+#else
+      {
+        static bool unified_memory = false;
+        static bool initialized = false;
+        if (!initialized) {
+          const char* env = getenv("TVM_UNIFIED_MEMORY");
+          if (env && atoi(env) != 0) {
+            unified_memory = true;
+            LOG(INFO) << "unified memory enabled";
+          }
+          initialized = true;
+        }
+        if (!unified_memory) {
+          VLOG(1) << "allocating " << nbytes << " bytes on device, with " << free_mem
+              << " bytes currently free out of " << total_mem << " bytes available";
+          CUDA_CALL(cudaMalloc(&ret, nbytes));
+        } else {
+          LOG(INFO) << "unified allocating " << nbytes << " bytes on device, with " << free_mem
+                  << " bytes currently free out of " << total_mem << " bytes available";
+          CUDA_CALL(cudaMallocManaged(&ret, nbytes));
+        }
+      }
+#endif
     }
     return ret;
   }

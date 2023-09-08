@@ -40,6 +40,8 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#include <chrono>
+#include <regex>
 
 #include "../file_utils.h"
 #include "../texture.h"
@@ -62,6 +64,8 @@ void GraphExecutor::Run() {
   // setup the array and requirements.
   for (size_t i = 0; i < op_execs_.size(); ++i) {
     if (op_execs_[i]) op_execs_[i]();
+    // LOG(INFO) << "run op " << i;
+    DeviceAPI::Get(devices_[0])->StreamSync(devices_[0], nullptr);
   }
 }
 
@@ -304,13 +308,131 @@ void GraphExecutor::LoadParams(const std::string& param_blob) {
 
 void GraphExecutor::LoadParams(dmlc::Stream* strm) {
   Map<String, NDArray> params = ::tvm::runtime::LoadParams(strm);
+  host_param_pool_.resize(params.size());
   for (auto& p : params) {
     param_names_.insert(p.first);
     int in_idx = GetInputIndex(p.first);
     if (in_idx < 0) continue;
     uint32_t eid = this->entry_id(input_nodes_[in_idx], 0);
     data_entry_[eid].CopyFrom(p.second);
+
+    std::string name = p.first;
+    size_t pid = std::stoi(name.substr(1));
+    host_param_pool_[pid].first = eid;
+    host_param_pool_[pid].second = p.second;
   }
+}
+
+void GraphExecutor::ResetStorage() {
+  if (param_load_stream_ == nullptr) {
+    // use first reset storage to initialize pipeline loading
+    param_load_stream_ = DeviceAPI::Get(storage_pool_[0]->device)->CreateStream(storage_pool_[0]->device);
+    pipeline_run_stream_ = DeviceAPI::Get(storage_pool_[0]->device)->CreateStream(storage_pool_[0]->device);
+    is_param_ready_.resize(data_entry_.size(), false);
+  }
+
+  for (auto &arr : storage_pool_) {
+    DeviceAPI::Get(arr->device)->FreeDataSpace(arr->device, arr->data);
+    arr.get_mutable()->dl_tensor.data = nullptr;
+  }
+  for (auto &e : data_entry_) {
+    e.get_mutable()->dl_tensor.data = nullptr;
+  }
+  for (size_t i = 0; i < is_param_ready_.size(); ++i) {
+    is_param_ready_[i] = false;
+  }
+  // storage_pool_.clear();
+  LOG(INFO) << "tvm: reset storage";
+}
+
+void GraphExecutor::AllocStorage() {
+  // if (storage_pool_[0]->data != nullptr) {
+  //   return ;
+  // }
+  auto t0 = std::chrono::steady_clock::now();
+  for (size_t i = 0; i < pool_entry_.size(); ++i) {
+    const auto &pit = pool_entry_[i];
+    // This for loop is very fast since there are usually only a couple of
+    // devices available on the same hardware.
+    const auto& cit = std::find_if(devices_.begin(), devices_.end(), [&pit](const Device& d) {
+      return pit.device_type == static_cast<int>(d.device_type);
+    });
+    Device dev = cit == devices_.end() ? devices_[0] : *cit;
+    if (pit.linked_param.defined()) {
+      CHECK(false);
+    } else {
+      std::vector<int64_t> shape = pit.shape;
+      if (shape.size() == 1) {
+        shape[0] = (shape[0] + 3) / 4;
+      }
+      Optional<String> mem_scope;
+      if (!pit.scope.empty()) {
+        mem_scope = String(pit.scope);
+      }
+      storage_pool_[i].get_mutable()->dl_tensor.data =
+          DeviceAPI::Get(dev)->AllocDataSpace(dev, shape.size(), shape.data(), pit.dtype, mem_scope);
+    }
+  }
+
+  for (size_t i = 0; i < data_entry_.size(); ++i) {
+    int storage_id = attrs_.storage_id[i];
+    data_entry_[i].get_mutable()->dl_tensor.data = storage_pool_[storage_id].get_mutable()->dl_tensor.data;
+    CHECK(data_entry_[i].get_mutable()->dl_tensor.data != nullptr);
+  }
+
+  auto t1 = std::chrono::steady_clock::now();
+  LOG(INFO) << "tvm: alloc storage " << std::chrono::duration<double, std::milli>(t1 - t0).count() << "ms";
+}
+
+void GraphExecutor::PipelineLoadParams() {
+  for (auto &param : host_param_pool_) {
+    auto eid = param.first;
+    auto param_arr = param.second;
+    if (!is_param_ready_[eid]) {
+      // auto t0 = std::chrono::steady_clock::now();
+      NDArray::CopyFromTo(
+          param_arr.operator->(), &data_entry_[eid].get_mutable()->dl_tensor, param_load_stream_);
+      DeviceAPI::Get(data_entry_[eid]->device)->StreamSync(data_entry_[eid]->device, param_load_stream_);
+      // auto t1 = std::chrono::steady_clock::now();
+      // LOG(INFO) << "tvm: load param " << eid << " " << std::chrono::duration<double, std::milli>(t1 - t0).count() << "ms";
+      is_param_ready_[eid] = true;
+    }
+    // param_arr.CopyTo(&storage_pool_[id].get_mutable()->dl_tensor);   
+    // DeviceAPI::Get(storage_pool_[id]->device)->CopyDataFromTo(
+    //   param_arr->data, 0, storage_pool_[id].get_mutable()->dl_tensor.data, 0,
+    //   GetDataSize(param_arr.get_mutable()->dl_tensor), 
+    //   param_arr->device, storage_pool_[id]->device, param_arr->dtype, nullptr
+    // );
+  }
+}
+
+void GraphExecutor::PipelineRun() {
+  double wait_param_ms = 0;
+  DeviceAPI::Get(devices_[0])->SetStream(devices_[0], pipeline_run_stream_);
+  for (size_t i = 0; i < op_execs_.size(); ++i) {
+    if (op_execs_[i]) {
+      auto t0 = std::chrono::steady_clock::now();
+      for (bool param_ready = false; !param_ready;) {
+        param_ready = true;
+        for (auto eid : input_param_eid_[i]) {
+          if (!is_param_ready_[eid]) {
+            param_ready = false;
+            break;
+          }
+        }
+      }
+      auto t1 = std::chrono::steady_clock::now();
+      op_execs_[i]();
+      DeviceAPI::Get(devices_[0])->StreamSync(devices_[0], pipeline_run_stream_);
+      // auto t2 = std::chrono::steady_clock::now();
+      wait_param_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+      // LOG(INFO) << "op_exec " << i;
+      // LOG(INFO) << "op_exec " << i << " wait " << ss
+      //           << std::chrono::duration<double, std::milli>(t1 - t0).count() << "ms"
+      //           << " exec " << std::chrono::duration<double, std::milli>(t2 - t1).count() << "ms";
+    }
+  }
+  LOG(INFO) << "tvm: wait load param stall " << wait_param_ms << "ms";
 }
 
 void GraphExecutor::ShareParams(const GraphExecutor& other, dmlc::Stream* strm) {
@@ -448,6 +570,7 @@ void GraphExecutor::SetupStorage() {
   }
 
   // Allocate the space.
+  pool_entry_ = pool_entry;
   for (const auto& pit : pool_entry) {
     // This for loop is very fast since there are usually only a couple of
     // devices available on the same hardware.
@@ -490,6 +613,7 @@ void GraphExecutor::SetupOpExecs() {
   input_dltensors_.resize(num_node_entries());
   output_dltensors_.resize(num_node_entries());
   both_output_opinput_dltensors_.resize(num_node_entries());
+  input_param_eid_.resize(op_execs_.size());
   std::unordered_set<uint32_t> input_node_eids;
   for (size_t i = 0; i < input_nodes_.size(); i++) {
     uint32_t nid = input_nodes_[i];
@@ -504,14 +628,22 @@ void GraphExecutor::SetupOpExecs() {
   for (uint32_t nid = 0; nid < this->GetNumOfNodes(); ++nid) {
     const auto& inode = nodes_[nid];
     if (inode.op_type == "null") continue;
-    std::vector<DLTensor> args;
+    // std::vector<DLTensor> args;
+    std::vector<DLTensor*> args;
     for (const auto& e : inode.inputs) {
       uint32_t eid = this->entry_id(e);
-      args.push_back(*(data_entry_[eid].operator->()));
+      // args.push_back(*(data_entry_[eid].operator->()));
+      args.push_back(&data_entry_[eid].get_mutable()->dl_tensor);
+
+      std::regex param_name{"p[0-9]+"};
+      if (nodes_[e.node_id].op_type == "null" && std::regex_search(nodes_[e.node_id].name, param_name)) {
+        input_param_eid_[nid].push_back(eid);
+      }
     }
     for (uint32_t index = 0; index < inode.param.num_outputs; ++index) {
       uint32_t eid = this->entry_id(nid, index);
-      args.push_back(*(data_entry_[eid].operator->()));
+      // args.push_back(*(data_entry_[eid].operator->()));
+      args.push_back(&data_entry_[eid].get_mutable()->dl_tensor);
     }
     ICHECK(inode.op_type == "tvm_op") << "Can only take tvm_op as op";
 
@@ -584,7 +716,73 @@ std::pair<std::function<void()>, std::shared_ptr<GraphExecutor::OpArgs>> GraphEx
   tvm::runtime::PackedFunc pf = module_.GetFunction(param.func_name, true);
   ICHECK(pf != nullptr) << "no such function in module: " << param.func_name;
 
-  auto fexec = [arg_ptr, pf]() {
+  auto fexec = [arg_ptr, pf, name=param.func_name]() {
+    for (size_t i = 0; i < arg_ptr->arg_values.size(); i++) {
+      if (arg_ptr->arg_tcodes[i] == kTVMDLTensorHandle) {
+        auto ts = static_cast<DLTensor*>(arg_ptr->arg_values[i].v_handle);
+        LOG(INFO) << "op " << name << " " << i << " " << std::hex << ts->data;
+      }
+    }
+    TVMRetValue rv;
+    TVMArgs targs(arg_ptr->arg_values.data(), arg_ptr->arg_tcodes.data(),
+                  static_cast<int>(arg_ptr->arg_values.size()));
+    pf.CallPacked(targs, &rv);
+  };
+  return {fexec, arg_ptr};
+}
+
+std::pair<std::function<void()>, std::shared_ptr<GraphExecutor::OpArgs>> GraphExecutor::CreateTVMOp(
+    const TVMOpParam& param, const std::vector<DLTensor*>& args) {
+  std::shared_ptr<GraphExecutor::OpArgs> arg_ptr = std::make_shared<GraphExecutor::OpArgs>();
+  // setup address.
+  // arg_ptr->args = args_copy;
+  for (auto arg : args) {
+    arg_ptr->args.push_back(*arg);
+  }
+  if (param.flatten_data) {
+    arg_ptr->shape_data.resize(arg_ptr->args.size());
+  }
+  for (size_t i = 0; i < arg_ptr->args.size(); ++i) {
+    TVMValue v;
+    // DLTensor* t = &arg_ptr->args[i];
+    DLTensor* t = args[i];
+    v.v_handle = t;
+    arg_ptr->arg_values.push_back(v);
+    arg_ptr->arg_tcodes.push_back(kTVMDLTensorHandle);
+    if (param.flatten_data) {
+      arg_ptr->shape_data[i] =
+          std::accumulate(t->shape, t->shape + t->ndim, 1, std::multiplies<int64_t>());
+      t->ndim = 1;
+      t->shape = &(arg_ptr->shape_data[i]);
+    }
+  }
+
+  if (param.func_name == "__nop") {
+    return {[]() {}, arg_ptr};
+  } else if (param.func_name == "__copy") {
+    // Perform cross device data copy.
+    // Directly copy data from the input to the output.
+    // TODO(mbs): device_copy cleanup.
+    auto fexec = [arg_ptr]() {
+      DLTensor* from = static_cast<DLTensor*>(arg_ptr->arg_values[0].v_handle);
+      DLTensor* to = static_cast<DLTensor*>(arg_ptr->arg_values[1].v_handle);
+      TVM_CCALL(TVMArrayCopyFromTo(from, to, nullptr));
+    };
+    return {fexec, arg_ptr};
+  }
+
+  // Get compiled function from the module that contains both host and device
+  // code.
+  tvm::runtime::PackedFunc pf = module_.GetFunction(param.func_name, true);
+  ICHECK(pf != nullptr) << "no such function in module: " << param.func_name;
+
+  auto fexec = [arg_ptr, pf, name=param.func_name]() {
+    // for (size_t i = 0; i < arg_ptr->arg_values.size(); i++) {
+    //   if (arg_ptr->arg_tcodes[i] == kTVMDLTensorHandle) {
+    //     auto ts = static_cast<DLTensor*>(arg_ptr->arg_values[i].v_handle);
+    //     LOG(INFO) << "op " << name << " " << i << " " << std::hex << ts->data;
+    //   }
+    // }
     TVMRetValue rv;
     TVMArgs targs(arg_ptr->arg_values.data(), arg_ptr->arg_tcodes.data(),
                   static_cast<int>(arg_ptr->arg_values.size()));
@@ -693,6 +891,22 @@ PackedFunc GraphExecutor::GetFunction(const String& name, const ObjectPtr<Object
   } else if (name == "load_params") {
     return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) {
       this->LoadParams(args[0].operator std::string());
+    });
+  } else if (name == "reset_storage") {
+    return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) { 
+      this->ResetStorage(); 
+    });
+  } else if (name == "alloc_storage") {
+    return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) { 
+      this->AllocStorage(); 
+    });
+  } else if (name == "pipeline_load_params") {
+    return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) { 
+      this->PipelineLoadParams(); 
+    });
+  } else if (name == "pipeline_run") {
+    return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) { 
+      this->PipelineRun(); 
     });
   } else if (name == "share_params") {
     return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) {
