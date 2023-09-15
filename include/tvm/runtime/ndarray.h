@@ -147,6 +147,9 @@ class NDArray : public ObjectRef {
    */
   TVM_DLL static NDArray Empty(ShapeTuple shape, DLDataType dtype, Device dev,
                                Optional<String> mem_scope = NullOpt);
+
+  TVM_DLL static NDArray Null(ShapeTuple shape, DLDataType dtype, Device dev,
+                              Optional<String> mem_scope = NullOpt);
   /*!
    * \brief Create a NDArray backed by an external DLTensor without memory copying.
    *

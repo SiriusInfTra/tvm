@@ -180,7 +180,7 @@ struct NDArray::Internal {
 };
 
 NDArray NDArray::CreateView(ShapeTuple shape, DLDataType dtype) {
-  ICHECK(data_ != nullptr);
+  // ICHECK(data_ != nullptr);
 
   const DLTensor& orig = get_mutable()->dl_tensor;
   ICHECK(IsContiguous()) << "Can only create view for compact tensor, but found strides " <<
@@ -225,6 +225,12 @@ NDArray NDArray::Empty(ShapeTuple shape, DLDataType dtype, Device dev, Optional<
   ret.get_mutable()->dl_tensor.data =
       DeviceAPI::Get(ret->device)
           ->AllocDataSpace(ret->device, shape.size(), shape.data(), ret->dtype, mem_scope);
+  return ret;
+}
+
+NDArray NDArray::Null(ShapeTuple shape, DLDataType dtype, Device dev, Optional<String> mem_scope) {
+  NDArray ret = Internal::Create(shape, dtype, dev);
+  ret.get_mutable()->dl_tensor.data = nullptr;
   return ret;
 }
 
