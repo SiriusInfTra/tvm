@@ -179,7 +179,7 @@ TargetJSON UpdateCUDAAttrs(TargetJSON target) {
     TVMRetValue version;
     if (!DetectDeviceFlag({kDLCUDA, 0}, runtime::kComputeVersion, &version)) {
       LOG(WARNING) << "Unable to detect CUDA version, default to \"-arch=sm_50\" instead";
-      archInt = 50;
+      archInt = 70;
     } else {
       archInt = std::stod(version.operator std::string()) * 10 + 0.1;
     }
