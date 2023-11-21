@@ -178,7 +178,7 @@ TargetJSON UpdateCUDAAttrs(TargetJSON target) {
     // Use the compute version of the first CUDA GPU instead
     TVMRetValue version;
     if (!DetectDeviceFlag({kDLCUDA, 0}, runtime::kComputeVersion, &version)) {
-      LOG(WARNING) << "Unable to detect CUDA version, default to \"-arch=sm_50\" instead";
+      LOG(WARNING) << "Unable to detect CUDA version, default to \"-arch=sm_70\" instead";
       archInt = 70;
     } else {
       archInt = std::stod(version.operator std::string()) * 10 + 0.1;
