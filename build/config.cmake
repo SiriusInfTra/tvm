@@ -217,10 +217,10 @@ set(USE_EDGETPU OFF)
 # - ON: enable cuDNN with cmake's auto search in CUDA directory
 # - OFF: disable cuDNN
 # - /path/to/cudnn: use specific path to cuDNN path
-set(USE_CUDNN ON)
+set(USE_CUDNN OFF)
 
 # Whether use cuBLAS
-set(USE_CUBLAS ON)
+set(USE_CUBLAS OFF)
 
 # Whether use MIOpen
 set(USE_MIOPEN OFF)
@@ -403,7 +403,7 @@ set(USE_GTEST AUTO)
 
 # Enable using CUTLASS as a BYOC backend
 # Need to have USE_CUDA=ON
-set(USE_CUTLASS ON)
+set(USE_CUTLASS OFF)
 
 # Enable to show a summary of TVM options
 set(SUMMARIZE OFF)
